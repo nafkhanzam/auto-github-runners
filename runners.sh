@@ -26,11 +26,20 @@ for bin in curl jq tar flock sha256sum systemctl loginctl; do
   command -v "$bin" >/dev/null || die "missing dependency: ${bin}"
 done
 
-# systemctl --user needs this user's own session bus. `su`/`sudo -u` don't provide one.
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+# systemctl --user talks to this user's manager via /run/user/<uid>. Always derive it:
+# after `su`, XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS still point at the caller's session.
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
 sctl() { systemctl --user "$@"; }
-sctl show-environment >/dev/null 2>&1 ||
-  die "cannot reach the systemd user manager; log in directly as $(id -un) (ssh or console), not via su"
+if ! sctl show-environment >/dev/null 2>&1; then
+  if [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
+    die "systemd user manager for $(id -un) is not running (${XDG_RUNTIME_DIR} missing).
+  Start it with either:
+    - a real login as $(id -un): ssh $(id -un)@localhost   (su/sudo -u don't start it)
+    - lingering (admin, once):   loginctl enable-linger $(id -un)"
+  fi
+  die "cannot reach the systemd user manager at ${XDG_RUNTIME_DIR}; try: ssh $(id -un)@localhost"
+fi
 
 set -a
 # shellcheck disable=SC1090
