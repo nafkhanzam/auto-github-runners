@@ -1,6 +1,6 @@
 # auto-github-runners
 
-Run multiple self-hosted GitHub Actions runners natively on one Linux machine. Each runner gets its own directory and its own systemd service, and they all share one config file.
+Run multiple self-hosted GitHub Actions runners natively on one Linux machine. Each runner gets its own directory and its own systemd **user** service, and they all share one config file. No root or sudo is needed.
 
 ```
 runners/
@@ -12,7 +12,7 @@ runners/
 
 ## How it works
 
-- `runners.sh` installs a systemd template unit, `github-runner@.service`, and starts one instance per runner.
+- `runners.sh` installs a systemd user template unit, `~/.config/systemd/user/github-runner@.service`, and starts one instance per runner under your own user manager (`systemctl --user`).
 - Each instance runs `start.sh`, which:
   1. installs the latest runner release into `runners/runner-N/` if the version there is missing or outdated, verifying the SHA256 checksum,
   2. gets a fresh registration token from the GitHub API using `ACCESS_TOKEN`,
@@ -23,9 +23,10 @@ runners/
 ## Requirements
 
 - Linux with systemd, on x64, arm64 or arm
-- `sudo` access, used only for `systemctl` and writing the unit file
+- A normal user account. No sudo or `wheel` membership required.
+- Lingering enabled for that user, so runners keep running after logout and start on boot (see [step 4](#4-start-runners))
 - `bash`, `curl`, `jq`, `tar`, `flock`, `sha256sum`
-- Libraries for the runner's .NET runtime:
+- Libraries for the runner's .NET runtime. These are system packages; if they're missing, ask an admin to install them:
 
 | Distro        | Command                                                                  |
 | ------------- | ------------------------------------------------------------------------ |
@@ -33,28 +34,20 @@ runners/
 | Debian/Ubuntu | `sudo apt install jq libicu-dev libkrb5-3 libssl3 zlib1g`                |
 | Fedora        | `sudo dnf install jq libicu krb5-libs openssl-libs zlib`                 |
 
-On Debian, Ubuntu and Fedora you can also run `runners/runner-1/bin/installdependencies.sh` with sudo after the first runner has been downloaded.
-
 ## Setup
 
-### 1. (Recommended) Create a dedicated user
+### 1. Clone
 
-Jobs run with the full permissions of the user that runs the runners. A dedicated user keeps them away from your own files and SSH keys.
+Log in **directly** as the user the runners should run as (SSH or console). `su` / `sudo -u` sessions have no systemd user bus, and `runners.sh` will refuse to run.
 
 ```bash
-sudo useradd -m -s /bin/bash gh-runner
-sudo -iu gh-runner
-git clone <this-repo> ~/auto-github-runners
+git clone https://github.com/nafkhanzam/auto-github-runners.git ~/auto-github-runners
 cd ~/auto-github-runners
 ```
 
-If workflows need Docker, add the user to the `docker` group. Be aware that this effectively gives jobs root on the machine:
+Jobs run with the full permissions of this user. If an admin can create a dedicated account for the runners, use that to keep jobs away from your own files and SSH keys.
 
-```bash
-sudo usermod -aG docker gh-runner
-```
-
-The runner user needs sudo for `runners.sh`. Alternatively, run the `systemctl` steps from an admin account.
+If workflows need Docker, an admin must add the user to the `docker` group (this effectively gives jobs root on the machine), or use [rootless Docker](https://docs.docker.com/engine/security/rootless/).
 
 ### 2. Create a GitHub token
 
@@ -93,7 +86,15 @@ See [`.env.example`](.env.example) for all options: `LABELS`, `RUNNER_GROUP`, `E
 ./runners.sh scale 4
 ```
 
-This writes `/etc/systemd/system/github-runner@.service` and enables and starts `github-runner@1` through `github-runner@4`. They also start automatically on boot.
+This writes `~/.config/systemd/user/github-runner@.service` and enables and starts `github-runner@1` through `github-runner@4` with `systemctl --user`.
+
+It also tries `loginctl enable-linger $USER`. Without lingering, systemd kills your user services when your last session ends and won't start them at boot. Most distros let a user enable it for themselves from a local session, but over SSH polkit may require an admin. If you see a lingering warning, ask an admin to run once:
+
+```bash
+loginctl enable-linger <your-user>
+```
+
+Check with `loginctl show-user $USER -p Linger`.
 
 ### 5. Verify
 
@@ -142,7 +143,10 @@ To force every runner onto the newest version right away, run `./runners.sh rest
 | `curl: (22) ... 403/404` on token request | The PAT lacks the required scope, or `REPO` is wrong (org vs `owner/repo`).           |
 | `Couldn't find a valid ICU package`       | Install the ICU library for your distro (see [Requirements](#requirements)).         |
 | Runner stuck **Offline** on GitHub        | Run `./runners.sh logs N`. Usually a network or token issue.                          |
-| `permission denied ... docker.sock`       | Add the runner user to the `docker` group, then `./runners.sh restart`.               |
+| `permission denied ... docker.sock`       | Ask an admin to add the user to the `docker` group, or use rootless Docker; then `./runners.sh restart`. |
+| `cannot reach the systemd user manager`   | Log in directly as the runner user (SSH/console), not via `su` / `sudo -u`.           |
+| Runners stop when you log out             | Lingering is off. Ask an admin to run `loginctl enable-linger <user>`.               |
+| `./runners.sh logs` shows nothing         | Per-user journals need persistent journald storage (`/var/log/journal`). Ask an admin, or use `./runners.sh status`. |
 | `missing dependency: X`                   | Install `X` (see [Requirements](#requirements)).                                      |
 
 ## Security notes
